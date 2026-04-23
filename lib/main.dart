@@ -10,8 +10,9 @@ import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart' as p;
 import 'package:weather/weather.dart';
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart'; 
 
-// --- 1. 데이터베이스 매니저 (기존 구조 유지) ---
+// --- 1. 데이터베이스 매니저 (구조 유지) ---
 class DBHelper {
   static late Database _db;
   static Future<void> init() async {
@@ -36,11 +37,7 @@ class KPathApp extends StatelessWidget {
   const KPathApp({super.key});
   @override
   Widget build(BuildContext context) {
-    return const MaterialApp(
-      debugShowCheckedModeBanner: false, 
-      title: 'K-Path',
-      home: KPathHomePage()
-    );
+    return const MaterialApp(debugShowCheckedModeBanner: false, title: 'K-Path', home: KPathHomePage());
   }
 }
 
@@ -52,47 +49,26 @@ class KPathHomePage extends StatefulWidget {
 }
 
 class _KPathHomePageState extends State<KPathHomePage> {
-  String _temp = "--°";
-  String _weather = "GPS 확인 중";
-  String _userId = "Guest"; 
-  String _userName = "";
-  String _userPhoto = ""; 
-  String _currentLang = "한국어";
-  int _totalCount = 0;
-  double _totalDist = 0.0;
+  String _temp = "--°"; String _weather = "GPS 확인 중"; String _userId = "Guest"; String _userName = ""; String _userPhoto = ""; String _currentLang = "한국어"; int _totalCount = 0; double _totalDist = 0.0;
   final WeatherFactory wf = WeatherFactory("856822fd8e22db5e3ba37c0eec9ca94c");
 
   @override
   void initState() { super.initState(); _startUp(); }
-  Future<void> _startUp() async { await [Permission.location, Permission.camera].request(); _refresh(); }
+  Future<void> _startUp() async { await [Permission.location, Permission.camera, Permission.manageExternalStorage].request(); _refresh(); }
   
   Future<void> _refresh() async {
     var userList = await DBHelper._db.query('user', limit: 1); 
     if (userList.isNotEmpty) {
       var user = userList.first;
-      setState(() {
-        _userId = user['id'] as String;
-        _userName = user['name'] as String? ?? "";
-        _userPhoto = user['photo'] as String? ?? "";
-        _currentLang = (user['lang'] as String?) ?? "한국어";
-      });
+      setState(() { _userId = user['id'] as String; _userName = user['name'] as String? ?? ""; _userPhoto = user['photo'] as String? ?? ""; _currentLang = (user['lang'] as String?) ?? "한국어"; });
       var res = await DBHelper._db.rawQuery("SELECT COUNT(*) as c, SUM(distance) as d FROM records WHERE userId = ?", [_userId]);
-      setState(() {
-        _totalCount = (res.first['c'] as int? ?? 0);
-        _totalDist = (res.first['d'] as num? ?? 0.0) / 1000.0;
-      });
-    } else {
-      setState(() { _userId = "Guest"; _userName = ""; _userPhoto = ""; });
-    }
+      setState(() { _totalCount = (res.first['c'] as int? ?? 0); _totalDist = (res.first['d'] as num? ?? 0.0) / 1000.0; });
+    } else { setState(() { _userId = "Guest"; _userName = ""; _userPhoto = ""; }); }
     _updateWeather();
   }
   
   Future<void> _updateWeather() async {
-    try {
-      Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high);
-      Weather w = await wf.currentWeatherByLocation(pos.latitude, pos.longitude);
-      setState(() { _temp = "${w.temperature?.celsius?.toStringAsFixed(1)}°"; _weather = "${w.weatherMain}"; });
-    } catch (_) { setState(() => _weather = "실외 권장"); }
+    try { Position pos = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high); Weather w = await wf.currentWeatherByLocation(pos.latitude, pos.longitude); setState(() { _temp = "${w.temperature?.celsius?.toStringAsFixed(1)}°"; _weather = "${w.weatherMain}"; }); } catch (_) { setState(() => _weather = "실외 권장"); }
   }
 
   @override
@@ -109,12 +85,7 @@ class _KPathHomePageState extends State<KPathHomePage> {
             ]),
             Positioned(top: 20, left: 20, right: 20, child: Row(children: [
               Row(children: [
-                CircleAvatar(
-                  radius: 25, 
-                  backgroundColor: Colors.white24, 
-                  backgroundImage: (_userPhoto.isNotEmpty && File(_userPhoto).existsSync()) ? FileImage(File(_userPhoto)) : null, 
-                  child: (_userPhoto.isEmpty || !File(_userPhoto).existsSync()) ? const Icon(Icons.person, color: Colors.white) : null
-                ),
+                CircleAvatar(radius: 25, backgroundColor: Colors.white24, backgroundImage: (_userPhoto.isNotEmpty && File(_userPhoto).existsSync()) ? FileImage(File(_userPhoto)) : null, child: (_userPhoto.isEmpty || !File(_userPhoto).existsSync()) ? const Icon(Icons.person, color: Colors.white) : null),
                 const SizedBox(width: 12),
                 Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   const Text("K-Path", style: TextStyle(color: Colors.orangeAccent, fontWeight: FontWeight.bold, fontSize: 13)),
@@ -150,7 +121,7 @@ class _KPathHomePageState extends State<KPathHomePage> {
   ));
 }
 
-// --- 3. 운동 페이지 (현재 위치 디폴트 및 지도선택 삭제) ---
+// --- 3. 운동 페이지 (GPX 저장 및 이어쓰기) ---
 class ExercisePage extends StatefulWidget {
   final String type; final String lang; final String userId;
   const ExercisePage({super.key, required this.type, required this.lang, required this.userId});
@@ -160,27 +131,54 @@ class ExercisePage extends StatefulWidget {
 
 class _ExercisePageState extends State<ExercisePage> {
   final MapController _mapC = MapController();
-  final List<LatLng> _points = [];
-  // [수정] 초기 좌표를 임시로 설정하고, initState에서 현재 위치를 즉시 가져옴
-  LatLng _loc = const LatLng(37.5665, 126.9780); 
+  List<LatLng> _points = [];
+  LatLng _loc = const LatLng(37.5665, 126.9780);
   double _dist = 0; int _sec = 0; bool _active = false; StreamSubscription<Position>? _sub;
+  static DateTime? _lastExitTime; 
+  static List<LatLng>? _lastPoints; 
+  static int? _lastSec; 
+  static double? _lastDist; 
 
   @override
   void initState() { 
     super.initState(); 
-    _initLoc(); // [수정] 시작하자마자 현재 위치로 지도를 이동
+    _initLoc();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _checkResume());
   }
   
+  void _checkResume() {
+    if (_lastExitTime != null && DateTime.now().difference(_lastExitTime!).inMinutes < 30) {
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (c) => AlertDialog(
+          backgroundColor: Colors.grey[900],
+          title: Text(widget.lang == "한국어" ? "이어쓰기" : "Resume", style: const TextStyle(color: Colors.white)),
+          content: Text(widget.lang == "한국어" ? "30분 이내의 기록이 있습니다. 이어하시겠습니까?" : "Found record within 30 mins. Resume?", style: const TextStyle(color: Colors.white70)),
+          actions: [
+            TextButton(child: Text(widget.lang == "한국어" ? "새로 시작" : "New"), onPressed: () { _lastExitTime = null; Navigator.pop(c); }),
+            TextButton(child: Text(widget.lang == "한국어" ? "이어하기" : "Resume"), onPressed: () {
+              setState(() {
+                _points = List.from(_lastPoints ?? []);
+                _sec = _lastSec ?? 0;
+                _dist = _lastDist ?? 0;
+              });
+              _lastExitTime = null;
+              Navigator.pop(c);
+              _start();
+            }),
+          ],
+        ),
+      );
+    }
+  }
+
   @override
   void dispose() { _sub?.cancel(); super.dispose(); }
 
   Future<void> _initLoc() async { 
-    // [수정] 현재 위치를 즉시 가져와서 지도의 초기 중심으로 설정
     Position p = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.high); 
-    setState(() { 
-      _loc = LatLng(p.latitude, p.longitude); 
-      _mapC.move(_loc, 16); 
-    }); 
+    setState(() { _loc = LatLng(p.latitude, p.longitude); _mapC.move(_loc, 16); }); 
   }
   
   void _start() {
@@ -190,6 +188,30 @@ class _ExercisePageState extends State<ExercisePage> {
       LatLng pos = LatLng(p.latitude, p.longitude);
       if (mounted) { setState(() { if (_points.isNotEmpty) _dist += Geolocator.distanceBetween(_points.last.latitude, _points.last.longitude, pos.latitude, pos.longitude); _points.add(pos); _loc = pos; _mapC.move(pos, 16); }); }
     });
+  }
+
+  Future<void> _saveAsGPX() async {
+    if (_points.isEmpty) return;
+    try {
+      Directory? downloadDir;
+      if (Platform.isAndroid) {
+        downloadDir = Directory('/storage/emulated/0/Download/K-Path-Records');
+      } else {
+        downloadDir = await getDownloadsDirectory();
+      }
+      
+      if (downloadDir != null) {
+        if (!await downloadDir.exists()) await downloadDir.create(recursive: true);
+        String fileName = "K-Path_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.gpx";
+        File file = File("${downloadDir.path}/$fileName");
+        String gpxContent = '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<gpx version="1.1" creator="K-Path" xmlns="http://www.topografix.com/GPX/1/1">\n'
+            '  <trk><name>${widget.type}</name><trkseg>\n' +
+            _points.map((p) => '    <trkpt lat="${p.latitude}" lon="${p.longitude}"></trkpt>').join('\n') +
+            '\n  </trkseg></trk>\n</gpx>';
+        await file.writeAsString(gpxContent);
+      }
+    } catch (e) { debugPrint("GPX Save Error: $e"); }
   }
 
   @override
@@ -208,12 +230,7 @@ class _ExercisePageState extends State<ExercisePage> {
             _stat(isKor ? "거리" : "Dist", "${(_dist/1000).toStringAsFixed(2)}km"),
             _stat(isKor ? "속도" : "Speed", "${(_dist/(_sec>0?_sec:1)*3.6).toStringAsFixed(1)}km/h"),
           ]))),
-        // [수정] 지도선택(Layers) 탭 삭제
-        Positioned(right: 15, top: 150, child: Column(children: [
-          _fab(Icons.my_location, _initLoc), 
-          const SizedBox(height: 12), 
-          _fab(Icons.camera_alt, () async => await ImagePicker().pickImage(source: ImageSource.camera)),
-        ])),
+        Positioned(right: 15, top: 150, child: Column(children: [_fab(Icons.my_location, _initLoc), const SizedBox(height: 12), _fab(Icons.camera_alt, () async => await ImagePicker().pickImage(source: ImageSource.camera))])),
         Positioned(bottom: 60, left: 50, right: 50, child: ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: _active ? Colors.red : Colors.green, foregroundColor: Colors.white, minimumSize: const Size(double.infinity, 55), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30))),
           onPressed: () async {
@@ -221,12 +238,16 @@ class _ExercisePageState extends State<ExercisePage> {
             else {
               String pts = _points.map((p) => "${p.latitude},${p.longitude}").join("|");
               await DBHelper._db.insert('records', {'userId': widget.userId, 'type': widget.type, 'distance': _dist, 'date': DateFormat('yyyy-MM-dd HH:mm').format(DateTime.now()), 'duration': '$_sec', 'points': pts});
+              await _saveAsGPX(); 
               Navigator.pop(context);
             }
           },
           child: Text(_active ? (isKor ? "운동 종료" : "Finish") : (isKor ? "시작하기" : "Start"), style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
         )),
-        Positioned(top: 45, left: 20, child: CircleAvatar(backgroundColor: Colors.white, child: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.black), onPressed: () => Navigator.pop(context)))),
+        Positioned(top: 45, left: 20, child: CircleAvatar(backgroundColor: Colors.white, child: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.black), onPressed: () {
+          if (_active) { _lastExitTime = DateTime.now(); _lastPoints = List.from(_points); _lastSec = _sec; _lastDist = _dist; }
+          Navigator.pop(context);
+        }))),
       ]),
     );
   }
@@ -234,7 +255,7 @@ class _ExercisePageState extends State<ExercisePage> {
   Widget _fab(IconData i, VoidCallback o) => FloatingActionButton(heroTag: null, mini: true, onPressed: o, backgroundColor: Colors.white, child: Icon(i, color: Colors.black87));
 }
 
-// --- 4. 설정 페이지 (기능 유지) ---
+// --- 4. 설정 페이지 ---
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
   @override
@@ -260,7 +281,7 @@ class _SettingsPageState extends State<SettingsPage> {
   }
 }
 
-// --- 5. 이용자 등록/관리 페이지 ---
+// --- 5. 이용자 관리 페이지 ---
 class UserProfilePage extends StatefulWidget {
   final String lang; const UserProfilePage({super.key, required this.lang});
   @override
@@ -282,7 +303,11 @@ class _UserProfilePageState extends State<UserProfilePage> {
     return Scaffold(appBar: AppBar(title: Text(isKor ? "이용자 관리" : "User Management")), body: SingleChildScrollView(padding: const EdgeInsets.all(20), child: Column(children: [
         GestureDetector(onTap: _pickImage, child: CircleAvatar(radius: 50, backgroundColor: Colors.grey[300], backgroundImage: _photoPath.isNotEmpty ? FileImage(File(_photoPath)) : null, child: _photoPath.isEmpty ? const Icon(Icons.camera_alt, size: 40) : null)),
         const SizedBox(height: 10), Text(isKor ? "사진 등록" : "Tap to upload photo"), const SizedBox(height: 20),
-        _input(_id, isKor ? "사용자 아이디 (필수)" : "User ID (Unique)", Icons.account_circle), _input(_name, isKor ? "성명" : "Name", Icons.person), _input(_age, isKor ? "나이" : "Age", Icons.calendar_today, isNum: true), _input(_height, isKor ? "키 (cm)" : "Height (cm)", Icons.height, isNum: true), _input(_weight, isKor ? "체중 (kg)" : "Weight (kg)", Icons.monitor_weight, isNum: true),
+        _input(_id, isKor ? "사용자 아이디 (필수)" : "User ID (Unique)", Icons.account_circle), 
+        _input(_name, isKor ? "성명" : "Name", Icons.person), 
+        _input(_age, isKor ? "나이" : "Age", Icons.calendar_today, isNum: true), 
+        _input(_height, isKor ? "키 (cm)" : "Height (cm)", Icons.height, isNum: true), 
+        _input(_weight, isKor ? "체중 (kg)" : "Weight (kg)", Icons.monitor_weight, isNum: true),
         const SizedBox(height: 20),
         ElevatedButton(style: ElevatedButton.styleFrom(minimumSize: const Size(double.infinity, 55), backgroundColor: Colors.blue, foregroundColor: Colors.white), onPressed: () async { if(_id.text.isEmpty) return; await DBHelper._db.insert('user', {'id': _id.text, 'name': _name.text, 'age': _age.text, 'height': _height.text, 'weight': _weight.text, 'voice': 1, 'lang': widget.lang, 'photo': _photoPath}, conflictAlgorithm: ConflictAlgorithm.replace); Navigator.pop(context); }, child: Text(isKor ? "저장 및 사용자 전환" : "Save & Switch User", style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)))
     ])));
@@ -290,7 +315,7 @@ class _UserProfilePageState extends State<UserProfilePage> {
   Widget _input(TextEditingController c, String l, IconData i, {bool isNum = false}) => Padding(padding: const EdgeInsets.only(bottom: 15), child: TextField(controller: c, keyboardType: isNum ? TextInputType.number : TextInputType.text, decoration: InputDecoration(prefixIcon: Icon(i), labelText: l, border: const OutlineInputBorder())));
 }
 
-// --- 6. 기록 페이지 / 상세 ---
+// --- 6. 기록 페이지 ---
 class HistoryPage extends StatefulWidget {
   final String userId; final String lang;
   const HistoryPage({super.key, required this.userId, required this.lang});
@@ -312,31 +337,16 @@ class _HistoryPageState extends State<HistoryPage> {
   }
 }
 
-// --- 7. 기록 상세 지도 화면 ---
 class HistoryDetailPage extends StatelessWidget {
   final Map<String, dynamic> record; final String lang;
   const HistoryDetailPage({super.key, required this.record, required this.lang});
   @override
   Widget build(BuildContext context) {
     bool isKor = lang == "한국어"; List<LatLng> points = [];
-    if (record['points'] != null && record['points'].toString().isNotEmpty) { 
-      points = record['points'].toString().split('|').map((s) { 
-        var latlng = s.split(','); return LatLng(double.parse(latlng[0]), double.parse(latlng[1])); 
-      }).toList(); 
-    }
-    return Scaffold(
-      appBar: AppBar(title: Text("${record['type']} ${isKor ? '상세' : 'Detail'}")), 
-      body: Stack(children: [
-        FlutterMap(options: MapOptions(initialCenter: points.isNotEmpty ? points.first : const LatLng(37.5665, 126.9780), initialZoom: 16), children: [ 
-          TileLayer(urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", userAgentPackageName: 'com.example.k_path_final'), 
-          if (points.isNotEmpty) PolylineLayer(polylines: [Polyline(points: points, strokeWidth: 5, color: Colors.blue)]), 
-        ]),
-        // [수정] 상세 화면 하단 기록바를 위로 올림 (bottom: 20 -> 50)
-        Positioned(bottom: 50, left: 20, right: 20, child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(15)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [ 
-          _info(isKor ? "시간" : "Time", "${(int.parse(record['duration'])~/60)}${isKor ? '분' : 'm'}"), 
-          _info(isKor ? "거리" : "Dist", "${((record['distance'] as double)/1000).toStringAsFixed(2)}km"), 
-          _info(isKor ? "날짜" : "Date", record['date'].toString().split(' ')[0]), 
-        ]))),
+    if (record['points'] != null && record['points'].toString().isNotEmpty) { points = record['points'].toString().split('|').map((s) { var latlng = s.split(','); return LatLng(double.parse(latlng[0]), double.parse(latlng[1])); }).toList(); }
+    return Scaffold(appBar: AppBar(title: Text("${record['type']} ${isKor ? '상세' : 'Detail'}")), body: Stack(children: [
+        FlutterMap(options: MapOptions(initialCenter: points.isNotEmpty ? points.first : const LatLng(37.5665, 126.9780), initialZoom: 16), children: [ TileLayer(urlTemplate: "https://tile.openstreetmap.org/{z}/{x}/{y}.png", userAgentPackageName: 'com.example.k_path_final'), if (points.isNotEmpty) PolylineLayer(polylines: [Polyline(points: points, strokeWidth: 5, color: Colors.blue)]), ]),
+        Positioned(bottom: 50, left: 20, right: 20, child: Container(padding: const EdgeInsets.all(15), decoration: BoxDecoration(color: Colors.black87, borderRadius: BorderRadius.circular(15)), child: Row(mainAxisAlignment: MainAxisAlignment.spaceAround, children: [ _info(isKor ? "시간" : "Time", "${(int.parse(record['duration'])~/60)}${isKor ? '분' : 'm'}"), _info(isKor ? "거리" : "Dist", "${((record['distance'] as double)/1000).toStringAsFixed(2)}km"), _info(isKor ? "날짜" : "Date", record['date'].toString().split(' ')[0]), ]))),
     ]));
   }
   Widget _info(String l, String v) => Column(children: [Text(l, style: const TextStyle(color: Colors.white70, fontSize: 12)), Text(v, style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold))]);
